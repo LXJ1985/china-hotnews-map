@@ -108,7 +108,7 @@
     <div id="insetMap"></div>
     <header id="header">
       <h1>数字化中国地图 · 实时热点新闻</h1>
-      <p>公众资讯 · Web 端 · 非商用演示 · <span id="srcMode">加载中…</span> · <span id="viewModeLabel">气泡视图</span> · <span id="buildTag" style="color:#4a5c7a">构建 V1.0</span></p>
+      <p>公众资讯 · Web 端 · 非商用演示 · <span id="srcMode">加载中…</span> · <span id="viewModeLabel">气泡视图</span> · <span id="buildTag" style="color:#4a5c7a">构建 V1.1·高亮</span></p>
     </header>
     <div id="toolbar">
       <div class="seg" id="viewSeg">
@@ -261,6 +261,8 @@ let drillZoom = 1;
 let autoTimer = null;
 let chart;
 let insetChart;   // 南海诸岛插图实例
+let highlightName = null;     // 当前点击高亮的行政区名（geojson name 格式），用于 geo.regions 边界凸显
+let GEO_NAMES = new Set();    // 底图所有行政区名（geojson feature.properties.name），用于市名双向映射
 
 function rand(a,b){ return a + Math.random()*(b-a); }
 function pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
@@ -318,7 +320,8 @@ function renderScatter(){
     geo:{ map:"china-cities", roam:true, zoom:drillZoom, center:drillCenter||null,
       boundingCoords:CHINA_BOUNDS, aspectScale:ASPECT_SCALE, ...geoLayout(),
       scaleLimit:{min:0.8,max:12},
-      itemStyle:{areaColor:"#16213a",borderColor:"#2a3a5c"}, emphasis:{disabled:true}, label:{show:false} },
+      itemStyle:{areaColor:"#16213a",borderColor:"#2a3a5c"}, emphasis:{disabled:true}, label:{show:false},
+      regions: highlightName ? [{ name:highlightName, itemStyle:{ areaColor:"rgba(43,108,255,0.30)", borderColor:"#4ea1ff", borderWidth:2.5, shadowBlur:14, shadowColor:"rgba(78,161,255,0.9)" } }] : [] },
     // 只用 geo 一套坐标系绘制底图 + 气泡（去掉冗余 map 系列，避免双坐标系/canvas 错位与纵向堆叠）
     series:[
       { type:"effectScatter", coordinateSystem:"geo", data, symbolSize:v=>8+v[2]/6, rippleEffect:{scale:2.4,brushType:"stroke"}, showEffectOn:"render" }
@@ -333,7 +336,8 @@ function renderHeat(){
     geo:{ map:"china-cities", roam:true, zoom:drillZoom, center:drillCenter||null,
       boundingCoords:CHINA_BOUNDS, aspectScale:ASPECT_SCALE, ...geoLayout(),
       scaleLimit:{min:0.8,max:12},
-      itemStyle:{areaColor:"#16213a",borderColor:"#2a3a5c"}, emphasis:{disabled:true}, label:{show:false} },
+      itemStyle:{areaColor:"#16213a",borderColor:"#2a3a5c"}, emphasis:{disabled:true}, label:{show:false},
+      regions: highlightName ? [{ name:highlightName, itemStyle:{ areaColor:"rgba(43,108,255,0.30)", borderColor:"#4ea1ff", borderWidth:2.5, shadowBlur:14, shadowColor:"rgba(78,161,255,0.9)" } }] : [] },
     visualMap:{ min:10, max:100, calculable:true, left:18, bottom:24, seriesIndex:0,
       inRange:{color:["#1a3a6b","#2b6cff","#37d0c4","#fac858","#ee6666"]}, textStyle:{color:"#8aa0c0"}, text:["高","低"] },
     // 同样只保留一套坐标系、单 canvas（去掉 zlevel:2，否则多 canvas 会被 pinCanvas 钉成 relative 后纵向堆叠）
@@ -391,6 +395,25 @@ function renderSideNews(city){
   }).join("");
 }
 
+// ---- 市名 ↔ 底图行政区名 双向映射 ----
+// 数据是带"市"的城市名（如"北京市"），而 geojson 的 properties.name 有时带"市"有时不带（如"北京"），
+// 点击地图行政区时拿到的 params.name 是 geojson 名，需双向匹配才能既下钻数据又高亮正确边界。
+function geoNameToCity(geoName){
+  if(!geoName) return null;
+  if(CITIES[geoName]) return geoName;
+  if(CITIES[geoName+"市"]) return geoName+"市";
+  const trim = geoName.replace(/市$/,"");
+  if(CITIES[trim]) return trim;
+  return null;
+}
+function cityToGeoName(city){
+  if(!city) return null;
+  if(GEO_NAMES.has(city)) return city;
+  const trim = city.replace(/市$/,"");
+  if(GEO_NAMES.has(trim)) return trim;
+  return null;
+}
+
 // ---- 下钻 ----
 function bars(map, keys, colorFn, total){
   return keys.map(k=>{ const v=map[k]||0; const pct=total?Math.round(v/total*100):0;
@@ -417,7 +440,7 @@ function drillCity(city){
   document.getElementById("detail").style.display="block";
 }
 function drillUp(){
-  drillCityName=null; drillCenter=null; drillZoom=1;
+  drillCityName=null; drillCenter=null; drillZoom=1; highlightName=null;
   document.getElementById("detail").style.display="none";
   renderView(); renderSideDefault();
 }
@@ -513,7 +536,7 @@ function ensureShell(){
       + "@media (max-height:640px){#legend{margin-top:148px;font-size:11px;padding:8px 10px}#legend .row{margin:2px 0}#legend .dot,#legend .ring{width:10px;height:10px}#detail{margin-top:148px}#insetMap{width:96px;height:116px;margin-bottom:60px}}";
     document.head.appendChild(st);
   }
-  if(ensureBlock('header', main, '<h1>数字化中国地图 · 实时热点新闻</h1><p>公众资讯 · Web 端 · 非商用演示 · <span id="srcMode">加载中…</span> · <span id="viewModeLabel">气泡视图</span> · <span id="buildTag" style="color:#4a5c7a">构建 V1.0</span></p>', ['srcMode','viewModeLabel','buildTag'])) healed = true;
+  if(ensureBlock('header', main, '<h1>数字化中国地图 · 实时热点新闻</h1><p>公众资讯 · Web 端 · 非商用演示 · <span id="srcMode">加载中…</span> · <span id="viewModeLabel">气泡视图</span> · <span id="buildTag" style="color:#4a5c7a">构建 V1.1·高亮</span></p>', ['srcMode','viewModeLabel','buildTag'])) healed = true;
   if(ensureBlock('toolbar', main, '<div class="seg" id="viewSeg"><button data-v="scatter" class="active">气泡视图</button><button data-v="heat">聚类热力</button></div>'
     + '<div class="seg" id="srcSeg"><button data-s="weibo" class="active">热搜</button><button data-s="news" class="active">新闻</button><button data-s="spider" class="active">爬虫</button></div>'
     + '<div class="timeGroup"><label>时间轴 <input type="range" id="timeSlider" min="0" max="0" value="0" /></label><span id="timeLabel">—</span>'
@@ -571,7 +594,19 @@ function shellIntact(){
 function bindChart(){
   if(!chart) return;
   chart.off("click");
-  chart.on("click",params=>{ if(params.data&&params.data.raw) drillCity(params.data.raw.city); });
+  chart.on("click", params=>{
+    if(params.componentType==='geo' && params.name){
+      // 点击行政区轮廓：高亮该市边界；若有数据则同时下钻详情
+      highlightName = params.name;
+      const city = geoNameToCity(params.name);
+      if(city) drillCity(city); else renderView();
+    } else if(params.componentType==='series'){
+      // 点击气泡/热力点：下钻（沿用既有行为），并把该市边界一并高亮
+      const city = params.data && params.data.raw ? params.data.raw.city : null;
+      if(city){ highlightName = cityToGeoName(city); drillCity(city); }
+      else if(highlightName){ highlightName = null; renderView(); } // 热力点无城市归属：取消高亮
+    }
+  });
 }
 // 南海诸岛插图：独立小实例，仅用 geo 聚焦南海海域（含三沙市岛礁），保证审图合规要素不被主图裁剪
 function initInset(){
@@ -615,6 +650,7 @@ async function fullInit(){
       return;
     }
     echarts.registerMap("china-cities", fcollCache);
+    (fcollCache.features||[]).forEach(f=>{ const nm=f.properties&&f.properties.name; if(nm) GEO_NAMES.add(nm); });
     mapReady = true; hideLoading();
     await fetchHotspots(); buildLegend(); renderView(); renderSideDefault();
     bindChart(); initInset();
@@ -678,6 +714,8 @@ if(window.__TEST_HOOKS__){
   H.drillCity=drillCity; H.renderView=renderView; H.renderSideDefault=renderSideDefault;
   H.drillUp=drillUp; H.refreshData=refreshData; H.updateTimeLabel=updateTimeLabel;
   H.viewData=viewData; H.fmtTime=fmtTime; H.toScatter=toScatter; H.esc=esc; H.buildLegend=buildLegend;
+  H.setHighlight=(n)=>{ highlightName=n; renderView(); }; H.getHighlight=()=>highlightName;
+  H.geoNameToCity=geoNameToCity; H.cityToGeoName=cityToGeoName; H.hasGeoName=(n)=>GEO_NAMES.has(n);
   Object.defineProperties(H, {
     ALL:{get:()=>ALL}, ALL_RAW:{get:()=>ALL_RAW}, CITIES:{get:()=>CITIES},
     activeCats:{get:()=>activeCats,set:v=>{activeCats=v}},

@@ -21,11 +21,19 @@ const JUHE_NEWS_TYPES = (process.env.JUHE_NEWS_TYPES || CFG.juheTypes || 'top')
 
 // ---- 城市/省份词典（用于地理归属）----
 const CITY_NAMES = ["北京市","上海市","广州市","深圳市","杭州市","南京市","成都市","武汉市","西安市","重庆市","天津市","苏州市","青岛市","郑州市","长沙市","沈阳市","大连市","厦门市","昆明市","哈尔滨市","济南市","福州市","合肥市","南昌市","贵阳市","南宁市","兰州市","太原市","石家庄市","长春市","海口市","银川市","西宁市","乌鲁木齐市","拉萨市","呼和浩特市","温州市","东莞市","佛山市","宁波市","无锡市","泉州市","洛阳市","香港","澳门","台北"];
-const PROVINCES = ["北京","上海","广东","深圳","浙江","江苏","四川","湖北","陕西","重庆","天津","山东","河南","湖南","辽宁","福建","安徽","江西","贵州","广西","甘肃","山西","河北","吉林","海南","宁夏","青海","新疆","西藏","内蒙古","云南","黑龙江"];
+// 省/自治区/直辖市 -> 省会/首府城市（用于地理归属，避免把省名错加成“XX市”导致落点失败）
+const PROV_TO_CAPITAL = {
+  "北京":"北京市","上海":"上海市","广东":"广州市","浙江":"杭州市","江苏":"南京市","四川":"成都市",
+  "湖北":"武汉市","陕西":"西安市","重庆":"重庆市","天津":"天津市","山东":"济南市","河南":"郑州市",
+  "湖南":"长沙市","辽宁":"沈阳市","福建":"福州市","安徽":"合肥市","江西":"南昌市","贵州":"贵阳市",
+  "广西":"南宁市","甘肃":"兰州市","山西":"太原市","河北":"石家庄市","吉林":"长春市","海南":"海口市",
+  "宁夏":"银川市","青海":"西宁市","新疆":"乌鲁木齐市","西藏":"拉萨市","内蒙古":"呼和浩特市",
+  "云南":"昆明市","黑龙江":"哈尔滨市"
+};
 
 function detectRegion(title){
   for(const c of CITY_NAMES){ if(title.includes(c.replace('市',''))) return c; }
-  for(const p of PROVINCES){ if(title.includes(p)) return p+'市'; }
+  for(const p of Object.keys(PROV_TO_CAPITAL)){ if(title.includes(p)) return PROV_TO_CAPITAL[p]; }
   return null;
 }
 
@@ -125,11 +133,10 @@ function newsSample(){
   ].map(([city,title]) => ({ title, heat:0, url:'#', source:'news' })); // 无 cityHint：演示样本归入"未定位"列表
 }
 
-// ---- 爬虫通道（M4）----
+// ---- 爬虫通道（M4）：真实新闻 RSS / 列表页抓取 ----
 const DEFAULT_SPIDER_URLS = [
-  // 可公开聚合的列表页；请按目标站点 robots 与条款合规使用
-  "https://www.chinanews.com.cn/scroll-news/news.shtml",
-  "https://news.sina.com.cn/"
+  "https://www.chinanews.com.cn/rss/scroll-news.xml", // 中新网即时新闻 RSS（公开聚合 feed，结构化真实新闻）
+  "https://news.sina.com.cn/roll/"                       // 新浪滚动新闻列表
 ];
 const SPIDER_TPL = [
   ["北京市","老旧小区加装电梯惠民工程落地"],["上海市","浦江夜游航线提质扩容迎客"],
@@ -139,8 +146,30 @@ const SPIDER_TPL = [
   ["南京市","城市更新重点项目通车"],["重庆市","山城步道修缮便民通行"],
   ["苏州市","古城保护更新工程见效"],["青岛市","海滨浴场提质迎客季开启"]
 ];
+// RSS/Atom：提取 <title>，去 CDATA 与 HTML 实体，过滤频道名/噪声
+function extractTitlesFromRss(xml){
+  const out=[]; const re=/<title>([\s\S]*?)<\/title>/gi; let m;
+  while((m=re.exec(xml))){
+    let t=m[1].replace(/<!\[CDATA\[|\]\]>/g,'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/[　\s]+/g,' ').trim();
+    if(t && t.length>=6 && t.length<=40 && /[一-龥]/.test(t)) out.push(t);
+  }
+  return out;
+}
+function extractTitlesFromHtml(html){
+  const out=[]; const re=/<a[^>]*>([^<]{4,40})<\/a>/g; let m; const seen=new Set();
+  while((m=re.exec(html))){ let t=m[1].replace(/[　\s]+/g,''); if(seen.has(t)||!/[一-龥]/.test(t))continue; seen.add(t); out.push(t); }
+  return out;
+}
+// 噪声词：导航/客户端/栏目名等，非真实新闻标题
+const TITLE_NOISE=["新浪","客户端","首页","专题","设为书签","点击下载","手机","邮箱","登录","注册","更多","视频","组图","图片","直播","滚动","频道","APP","即时新闻","中新网","新闻网","人民网","新华网"];
+function isTitleNoise(t){
+  if(TITLE_NOISE.some(n=>t.includes(n))) return true;
+  if(/^(首页|专题|客户端|频道|更多)$/.test(t)) return true;
+  return false;
+}
+// 仅在完全无外网时兜底，明确标记 source:'demo'（不再伪装成 source:'spider' 真实数据）
 function spiderSample(){
-  return SPIDER_TPL.map(([city,title])=>({title, heat:0, url:'#', source:'spider', cityHint:city}));
+  return SPIDER_TPL.map(([city,title])=>({title, heat:0, url:'#', source:'demo', cityHint:city}));
 }
 async function fetchText(url, timeout=8000){
   const ctrl = new AbortController();
@@ -159,8 +188,17 @@ async function robotsAllowed(urlStr){
     if(robotsCache[rb]!==undefined) return robotsCache[rb];
     const txt = await fetchText(rb, 5000);
     if(!txt){ robotsCache[rb]=true; return true; }
-    const disallowAll = /Disallow:\s*\//.test(txt) && !/Allow:/m.test(txt);
-    const allowed = !disallowAll;
+    // 正确解析 robots：仅当该具体路径被 Disallow 且未被 Allow 覆盖时才禁止，
+    // 避免把 "Disallow: /wap/" 等部分路径禁止误判为整站禁止（旧逻辑的正则 bug）
+    const path = u.pathname || '/';
+    let agentAll = false, allowed = true;
+    for(const line of txt.split('\n')){
+      const ln = line.trim();
+      if(/^user-agent:/i.test(ln)){ agentAll = /\*$/.test(ln.split(':')[1].trim()); continue; }
+      if(!agentAll) continue; // 仅处理通配 agent(*) 规则
+      if(/^disallow:/i.test(ln)){ const p = ln.split(':').slice(1).join(':').trim(); if(p==='/' || (p && path.startsWith(p))) allowed = false; }
+      else if(/^allow:/i.test(ln)){ const p = ln.split(':').slice(1).join(':').trim(); if(p==='/' || (p && path.startsWith(p))) allowed = true; }
+    }
     robotsCache[rb] = allowed; return allowed;
   }catch(e){ return true; }
 }
@@ -168,20 +206,25 @@ async function crawlSpider(){
   const cfg = (process.env.SPIDER_URLS||'').split(',').map(s=>s.trim()).filter(Boolean);
   const urls = cfg.length ? cfg : DEFAULT_SPIDER_URLS;
   const items = [];
+  const seenTitles = new Set(); // 跨源标题去重（中新网 RSS 与 sina 滚动可能撞同一新闻）
   for(const url of urls.slice(0,5)){
-    if(!(await robotsAllowed(url))) continue; // 遵守 robots
-    const html = await fetchText(url, 8000);
-    if(!html) continue;
-    const re = /<a[^>]*>([^<]{4,40})<\/a>/g; let m; const seen = new Set();
-    while((m = re.exec(html))){
-      let t = m[1].replace(/[\s　]+/g,'');
-      if(seen.has(t) || !/[一-龥]/.test(t)) continue; seen.add(t);
+    if(!(await robotsAllowed(url))){ console.log('[spider] robots 禁止,跳过:', url); continue; }
+    const isRss = /\.xml$|rss|feed/i.test(url);
+    const raw = await fetchText(url, 8000);
+    if(!raw){ console.log('[spider] 抓取失败:', url); continue; }
+    const titles = isRss ? extractTitlesFromRss(raw) : extractTitlesFromHtml(raw);
+    for(const t of titles){
+      if(isTitleNoise(t)) continue;
+      // 归一化：去除空白与常见中英文标点后再判重，避免"驰援西藏"vs"驰援西藏。"被当两条
+      const key = t.replace(/[\s　，。、！？,.!?；;：:"'（）()【】\[\]]/g, '');
+      if(seenTitles.has(key)) continue;
+      seenTitles.add(key);
       const city = detectRegion(t);
       if(!city) continue; // 仅保留能定位到城市的条目，提升地理精度
       items.push({ title:t, heat:0, url:url, source:'spider', cityHint:city });
-      if(items.length>=15) break;
+      if(items.length>=20) break;
     }
-    if(items.length>=15) break;
+    if(items.length>=20) break;
   }
   return items;
 }
@@ -263,7 +306,7 @@ async function buildHotspots(){
   let spider = [];
   try { spider = await crawlSpider(); logs.push(`spider:${spider.length}`); }
   catch(e){ logs.push(`spider:fail(${e.message})`); }
-  if(spider.length === 0){ spider = spiderSample(); logs.push('spider:sample(auto)'); }
+  if(spider.length === 0){ spider = spiderSample(); logs.push('spider:demo(无外网兜底)'); }
   raw = raw.concat(spider);
 
   let sample = false;
@@ -303,8 +346,12 @@ async function ensureMapFile(){
   const p = await fetch(BASE + '100000_full.json');
   const provinces = await p.json();
   const fcoll = { type:'FeatureCollection', features:[] };
+  // 直辖市在 DataV 中为省级，下属只有 district 级（无 city 级），需把整省轮廓直接入库；
+  // 其省级 name 形如"北京市"，与前端 CITIES 词典一致，可正常参与点击高亮映射。
+  const MUNICIPALITY = new Set(['110000','310000','120000','500000']);
   for(const f of provinces.features){
     const code = f.properties.adcode;
+    if(MUNICIPALITY.has(String(code))){ fcoll.features.push(f); continue; }
     try{
       const r = await fetch(`${BASE}${code}_full.json`);
       const d = await r.json();

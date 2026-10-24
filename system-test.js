@@ -60,7 +60,7 @@ function ok(name, cond, detail) {
   // ---------- T3 前端交互链路 + XSS ----------
   console.log('\n[T3] 前端交互链路 + XSS 断言');
   const html = fs.readFileSync(__dirname + '/index.html', 'utf8');
-  const code = html.match(/<script>\n([\s\S]*?)<\/script>/)[1];
+  const code = html.match(/<script(?![^>]*\bsrc=)[^>]*>\r?\n([\s\S]*?)<\/script>/)[1];
   const XSS_TITLE = '<script>alert(1)</script><img src=x onerror=alert(2)>';
   const XSS_URL = 'javascript:alert(3)';
   const elements = {};
