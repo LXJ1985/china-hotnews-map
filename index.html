@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>数字化中国地图 · 实时热点新闻（M4）</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%2316213a' stroke='%234ea1ff' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23ee6666'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%234ea1ff' stroke-width='1' opacity='0.5'/%3E%3C/svg%3E" />
+<script src="./echarts.min.js"></script>
+<script src="./geo-fallback.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f1729; color: #e6edf6; }
+  #app { display: flex; height: 100vh; }
+  #main { flex: 1; position: relative; overflow: hidden; display: grid; }
+  /* 同格叠加：所有层堆叠在同一网格单元格。统一 position:relative —— canvas 被 pinCanvas 钉成 relative 后属"定位元素"，
+     会盖在静态兄弟之上拦截点击；让所有子块同为 relative，绘制顺序即回归 DOM 顺序（mapWrap 在底、UI 在上）。
+     relative 不是绝对定位，不会被快照层剥离。 */
+  #main > * { grid-area: 1 / 1; position: relative; }
+  #mapWrap { width: 100%; height: 100%; }
+  /* 南海诸岛插图：右下角（Grid 叠加，无绝对定位）。主图聚焦大陆，诸岛在此独立呈现，符合审图合规 */
+  #insetMap { justify-self: end; align-self: end; margin: 0 18px 64px 0; width: 132px; height: 158px;
+    background: rgba(13,20,35,.92); border: 1px solid #25324d; border-radius: 8px; }
+  #side { width: 340px; background: #131c30; border-left: 1px solid #25324d; padding: 16px; overflow-y: auto; }
+  /* header 同时匹配标签与 id：ensureBlock 自愈重建时生成的是 <div id="header">，
+     若只用标签选择器会失去定位与字号（曾导致标题重叠"串位"） */
+  header, #header { justify-self: start; align-self: start; margin: 14px 18px; }
+  header h1, #header h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+  header p, #header p { font-size: 12px; color: #8aa0c0; margin: 0; }
+  /* 顶部工具栏（Grid 叠加，无绝对定位） */
+  /* toolbar 置于 header 下方（margin-top 62 = header 顶部14 + 高44 + 4间隙），避免同格水平重叠压住标题 */
+  #toolbar { justify-self: center; align-self: start; margin-top: 62px;
+    background: rgba(17,25,43,.97); border: 1px solid #2a3a5c; border-radius: 10px; padding: 8px 12px;
+    box-shadow: 0 6px 22px rgba(0,0,0,.45);
+    display: flex; align-items: center; gap: 14px; row-gap: 8px; font-size: 12px; max-width: 92%; flex-wrap: wrap; }
+  #toolbar .seg { display: flex; border: 1px solid #2a3a5c; border-radius: 7px; overflow: hidden; flex: 0 0 auto; }
+  #toolbar .seg button { background: transparent; border: 0; color: #cfe0ff; padding: 6px 12px; cursor: pointer; font-size: 12px; border-radius: 0; white-space: nowrap; }
+  #toolbar .seg button.active { background: #2b6cff; color: #fff; }
+  /* 时间轴组不可被压缩：否则 flex 会把 slider 挤成一小截、把标签挤出面板（曾出现文字压在地图上） */
+  #toolbar label { color: #8aa0c0; display: flex; align-items: center; gap: 5px; flex: 0 0 auto; white-space: nowrap; }
+  #timeSlider { width: 170px; min-width: 90px; flex: 0 0 auto; accent-color: #2b6cff; }
+  #timeLabel { color: #cfe0ff; min-width: 88px; flex: 0 0 auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* 时间轴+时间+自动刷新 包成不换行整体：避免 flex-wrap 把"自动刷新"拆到下一行，使其始终紧贴时间后面 */
+  #toolbar .timeGroup { display: flex; align-items: center; gap: 14px; flex-wrap: nowrap; flex: 0 0 auto; }
+  #legend { justify-self: end; align-self: start; margin: 152px 18px 0 0; background: rgba(17,25,43,.97); border: 1px solid #2a3a5c; border-radius: 8px; padding: 10px 12px; font-size: 12px; box-shadow: 0 6px 22px rgba(0,0,0,.45); }
+  #legend .row { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; user-select: none; }
+  #legend .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  #legend .off { opacity: .35; text-decoration: line-through; }
+  #legend .ring { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #ee6666; display: inline-block; }
+  #refresh { justify-self: end; align-self: end; margin: 0 18px 18px 0; }
+  button { background: #2b6cff; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+  button:hover { background: #1f5ae0; }
+  button.ghost { background: #21314f; }
+  button.ghost:hover { background: #2a3f66; }
+  /* 下钻详情面板（Grid 叠加） */
+  #detail { justify-self: start; align-self: start; margin: 152px 18px; width: 300px; background: rgba(15,23,41,.94);
+    border: 1px solid #2a3a5c; border-radius: 12px; padding: 14px; display: none; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+  #detail h3 { margin: 0 0 4px; font-size: 16px; }
+  #detail .sub { font-size: 12px; color: #8aa0c0; margin-bottom: 10px; }
+  #detail .stat { display: flex; gap: 8px; margin-bottom: 12px; }
+  #detail .stat .box { flex: 1; background: #16213a; border: 1px solid #2a3a5c; border-radius: 8px; padding: 8px; text-align: center; }
+  #detail .stat .num { font-size: 19px; font-weight: 700; }
+  #detail .stat .lab { font-size: 11px; color: #8aa0c0; }
+  #detail .sect { font-size: 12px; color: #cfe0ff; margin: 10px 0 6px; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px; }
+  .bar-row .name { width: 48px; color: #b9c4d6; }
+  .bar-row .track { flex: 1; height: 10px; background: #16213a; border-radius: 5px; overflow: hidden; }
+  .bar-row .fill { height: 100%; border-radius: 5px; }
+  .bar-row .val { width: 30px; text-align: right; color: #8aa0c0; }
+  #side h2 { font-size: 15px; margin: 4px 0 12px; }
+  #side .back { margin-bottom: 10px; }
+  .news-item { background: #1a2540; border: 1px solid #2a3a5c; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+  .news-item .t { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .news-item .t a { color: #e6edf6; text-decoration: none; }
+  .news-item .t a:hover { text-decoration: underline; }
+  .news-item .meta { font-size: 12px; color: #8aa0c0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .tag { padding: 1px 7px; border-radius: 4px; font-size: 11px; }
+  .tag-cat { background: #21314f; color: #cfe0ff; }
+  .tag-sent-pos { background: #163a2a; color: #6ee7a8; }
+  .tag-sent-neu { background: #2a2f3d; color: #b9c4d6; }
+  .tag-sent-neg { background: #3a1c1c; color: #ff9a9a; }
+  .tag-src-weibo { background: #3a1c24; color: #ff9a9a; }
+  .tag-src-news { background: #16331f; color: #6ee7a8; }
+  .tag-src-spider { background: #3a2f12; color: #fac858; }
+  .tag-src-sample { background: #2a2f3d; color: #b9c4d6; }
+  .city-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; margin-bottom: 6px;
+    background: #1a2540; border: 1px solid #2a3a5c; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .city-row:hover { border-color: #2b6cff; }
+  .city-row .cnt { background: #21314f; color: #cfe0ff; border-radius: 10px; padding: 1px 9px; font-size: 12px; }
+  #loading { justify-self: stretch; align-self: stretch; display: flex; align-items: center; justify-content: center; font-size: 14px; color: #8aa0c0; background: #0f1729; }
+  .hint { font-size: 12px; color: #6b7d9c; margin-top: 8px; line-height: 1.5; }
+  /* 窄屏保护：工具栏 max-width 变小会换行增高，此时图例/详情需再下移，避免与之叠压 */
+  @media (max-width: 1200px) { #legend, #detail { margin-top: 220px; } }
+  /* 矮窗口紧凑模式：右侧竖排空间不足时，图例缩小上移、南海诸岛插图缩小，
+     保证"图例 / 插图 / 刷新按钮"三者互不覆盖（曾出现图例把插图整块盖住） */
+  @media (max-height: 640px) {
+    #legend { margin-top: 148px; font-size: 11px; padding: 8px 10px; }
+    #legend .row { margin: 2px 0; }
+    #legend .dot, #legend .ring { width: 10px; height: 10px; }
+    #detail { margin-top: 148px; }
+    #insetMap { width: 96px; height: 116px; margin-bottom: 60px; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="main">
+    <div id="mapWrap"></div>
+    <div id="insetMap"></div>
+    <header id="header">
+      <h1>数字化中国地图 · 实时热点新闻</h1>
+      <p>公众资讯 · Web 端 · 非商用演示 · <span id="srcMode">加载中…</span> · <span id="viewModeLabel">气泡视图</span> · <span id="buildTag" style="color:#4a5c7a">构建 V1.0</span></p>
+    </header>
+    <div id="toolbar">
+      <div class="seg" id="viewSeg">
+        <button data-v="scatter" class="active">气泡视图</button>
+        <button data-v="heat">聚类热力</button>
+      </div>
+      <div class="seg" id="srcSeg">
+        <button data-s="weibo" class="active">热搜</button>
+        <button data-s="news" class="active">新闻</button>
+        <button data-s="spider" class="active">爬虫</button>
+      </div>
+      <div class="timeGroup">
+        <label>时间轴 <input type="range" id="timeSlider" min="0" max="0" value="0" /></label>
+        <span id="timeLabel">—</span>
+        <label><input type="checkbox" id="autoRefresh" /> 自动刷新 30s</label>
+      </div>
+    </div>
+    <div id="legend"></div>
+    <div id="detail">
+      <h3 id="dCity">—</h3>
+      <div class="sub" id="dSub">—</div>
+      <div class="stat">
+        <div class="box"><div class="num" id="dCount">0</div><div class="lab">热点数</div></div>
+        <div class="box"><div class="num" id="dAvg">0</div><div class="lab">平均热度</div></div>
+        <div class="box"><div class="num" id="dScore">0</div><div class="lab">情感分</div></div>
+      </div>
+      <div class="sect">分类构成</div>
+      <div id="dCat"></div>
+      <div class="sect">情感构成</div>
+      <div id="dSent"></div>
+      <div class="sect">来源构成</div>
+      <div id="dSrc"></div>
+      <button class="ghost" style="width:100%;margin-top:12px" onclick="drillUp()">返回全国视图</button>
+    </div>
+    <div id="refresh"><button onclick="refreshData()">↻ 刷新数据</button></div>
+    <div id="loading">正在加载地级市底图（DataV 审图合规源）…</div>
+  </div>
+  <div id="side">
+    <div id="sideHead"></div>
+    <div id="newsList"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+// 单实例守卫：本环境的快照层会用 document.open()/write() 重放整个文档（连 <html> 都换掉），
+// 录制版内的脚本会被二次执行。重放实例直接退出，由原实例的看门狗在闭包外持续修复新文档。
+// 所有状态封装在本 IIFE 闭包内，不受文档重放导致的全局环境重置影响。
+if(window.__APP_ACTIVE__) return; window.__APP_ACTIVE__ = true;
+// 全局错误可视化：任何异常直接显示在屏幕上，避免静默空白
+window.addEventListener("error", e=>{
+  const el = document.getElementById("loading");
+  if(el){ el.style.display="flex"; el.style.whiteSpace="pre-wrap"; el.style.padding="24px"; el.style.textAlign="left";
+    el.innerHTML = "⚠️ 运行出错（请把这段发我）：\n\n" + (e.message||e.error||"未知错误") + "\n" + (e.filename||"") + ":" + (e.lineno||""); }
+});
+const CATEGORIES = { "民生":"#5470c6", "财经":"#91cc75", "突发":"#ee6666", "文娱":"#9a60b4", "体育":"#fac858" };
+const CAT_KEYS = Object.keys(CATEGORIES);
+const SENT_RING = { pos: "#4ea1ff", neu: "#5a6b85", neg: "#ff5b5b" };
+const SENT_LABEL = { pos: "正面", neu: "中性", neg: "负面" };
+const SRC_LABEL = { weibo:"热搜", news:"新闻", spider:"爬虫", sample:"样本" };
+const SRC_COLOR = { weibo:"#ff5b5b", news:"#6ee7a8", spider:"#fac858", sample:"#b9c4d6" };
+// 主图地理范围：聚焦大陆+台湾+海南（lat 17.3~53.6），填满画面、垂直居中，消除"偏上"。
+// 南海诸岛（三沙市 lat 3.84 起）不在主图内，由右下角 #insetMap 独立呈现 —— 审图合规要素不缺失。
+// 若把南海诸岛并入主图（lat 3.8 起），包围盒被拉高、大陆会被顶到上方 2/3，正是"偏上"的成因。
+const CHINA_BOUNDS = [[73.5, 17.3], [135.1, 53.6]];
+// 地图绘制区域的内缩量：顶部让开 header(14+44) 与 toolbar(62+48) 组成的 UI 带，
+// 右侧让开图例/刷新按钮。这样地图永远不会被文字和按钮压住（曾出现"地图与文字重叠"）。
+// 数值与 CSS 中的 header/toolbar margin 保持同步：top = 6 + 110。
+const MAP_INSET = { top: 116, bottom: 10, left: 10, right: 132 };
+// 实测 UI 实际占位后再决定地图可用区域：工具栏在窄屏会换行变高，
+// 固定数值会让地图钻到工具栏底下 → 用 DOM 真实边界动态算（拿不到时退回 MAP_INSET）。
+function geoInsets(){
+  const m = document.getElementById("main");
+  if(!m) return MAP_INSET;
+  const mr = m.getBoundingClientRect();
+  if(!mr.width || !mr.height) return MAP_INSET;
+  let top = MAP_INSET.top, right = MAP_INSET.right;
+  const tb = document.getElementById("toolbar");
+  const tbr = tb && tb.getBoundingClientRect();
+  if(tbr && tbr.height > 0 && tbr.bottom > mr.top) top = Math.max(MAP_INSET.top, Math.round(tbr.bottom - mr.top + 8));
+  const lg = document.getElementById("legend");
+  const lgr = lg && lg.getBoundingClientRect();
+  if(lgr && lgr.width > 0 && lgr.height > 0) right = Math.max(MAP_INSET.right, Math.round(mr.right - lgr.left + 10));
+  // 兜底：极端小窗下也别把地图压没
+  if(top > mr.height * 0.45) top = Math.round(mr.height * 0.45);
+  if(right > mr.width * 0.45) right = Math.round(mr.width * 0.45);
+  return { top, bottom: MAP_INSET.bottom, left: MAP_INSET.left, right };
+}
+
+// aspectScale：纬度方向相对经度的像素缩放。china-cities.json 是纯经纬度（等经纬投影）数据，
+// ECharts 默认 0.75 会把纬度压得过狠 → 地图偏瘦高、"比例不对"。
+// 中国主体位于 ~35°N，真实东西向/南北向视觉比 ≈ cos(35°)≈0.82；0.85 实测观感最接近标准中国地图
+// （渲染宽高比 = 经度跨度/纬度跨度 × aspectScale = 1.697×0.85 ≈ 1.44，比 0.75 的 1.27 舒展得多）。
+const ASPECT_SCALE = 0.85;
+// 中国地图渲染出来的真实宽高比（= geo 的像素宽/高）。用于计算 layoutSize 的铺满尺寸，必须与 ASPECT_SCALE 同步。
+const MAP_RATIO = ((135.1 - 73.5) / (53.6 - 17.3)) * ASPECT_SCALE;
+// 用 layoutCenter + layoutSize 让地图「等比缩放」并居中于可用区。
+// 只用 boundingCoords 时，echarts 会把经纬度矩形「拉伸填满」容器减内缩后的矩形，
+// 导致宽高比随窗口变化（1440→1.358、1280→1.318）= 地图变形（"比例不对"）。
+function geoLayout(){
+  const m = document.getElementById("main");
+  const fallback = { layoutCenter:["50%","56%"], layoutSize:"88%" };
+  if(!m) return fallback;
+  const mr = m.getBoundingClientRect();
+  if(!mr.width || !mr.height) return fallback;
+  let top = MAP_INSET.top, right = MAP_INSET.right;
+  const tb = document.getElementById("toolbar");
+  const tbr = tb && tb.getBoundingClientRect();
+  if(tbr && tbr.height > 0 && tbr.bottom > mr.top) top = Math.max(MAP_INSET.top, Math.round(tbr.bottom - mr.top + 8));
+  const lg = document.getElementById("legend");
+  const lgr = lg && lg.getBoundingClientRect();
+  if(lgr && lgr.width > 0 && lgr.height > 0) right = Math.max(MAP_INSET.right, Math.round(mr.right - lgr.left + 10));
+  if(top > mr.height * 0.45) top = Math.round(mr.height * 0.45);
+  if(right > mr.width * 0.45) right = Math.round(mr.width * 0.45);
+  const availW = Math.max(80, mr.width - MAP_INSET.left - right);
+  const availH = Math.max(80, mr.height - top - MAP_INSET.bottom);
+  const cx = MAP_INSET.left + availW / 2;   // 可用区水平中心
+  const cy = top + availH / 2;              // 可用区垂直中心
+  // 按真实比例取最大铺满尺寸（留 4% 余量），保证不压工具栏/图例、不裁边
+  const w = Math.min(availW * 0.96, availH * 0.96 * MAP_RATIO);
+  return { layoutCenter: [Math.round(cx), Math.round(cy)], layoutSize: Math.round(w) };
+}
+
+const CITIES = {
+  "北京市":[116.41,39.90],"上海市":[121.47,31.23],"广州市":[113.26,23.13],"深圳市":[114.06,22.55],
+  "杭州市":[120.15,30.27],"南京市":[118.80,32.06],"成都市":[104.07,30.57],"武汉市":[114.30,30.59],
+  "西安市":[108.95,34.27],"重庆市":[106.55,29.56],"天津市":[117.20,39.13],"苏州市":[120.62,31.32],
+  "青岛市":[120.38,36.07],"郑州市":[113.65,34.76],"长沙市":[112.94,28.23],"沈阳市":[123.43,41.80],
+  "大连市":[121.62,38.91],"厦门市":[118.09,24.48],"昆明市":[102.71,25.04],"哈尔滨市":[126.53,45.80],
+  "济南市":[117.00,36.65],"福州市":[119.30,26.08],"合肥市":[117.28,31.86],"南昌市":[115.89,28.68],
+  "贵阳市":[106.71,26.65],"南宁市":[108.37,22.82],"兰州市":[103.83,36.06],"太原市":[112.55,37.87],
+  "石家庄市":[114.51,38.04],"长春市":[125.32,43.82],"海口市":[110.20,20.04],"银川市":[106.23,38.49],
+  "西宁市":[101.78,36.62],"乌鲁木齐市":[87.62,43.82],"拉萨市":[91.11,29.97],"呼和浩特市":[111.75,40.84],
+  "温州市":[120.70,28.00],"东莞市":[113.75,23.04],"佛山市":[113.12,23.02],"宁波市":[121.55,29.88],
+  "无锡市":[120.30,31.57],"泉州市":[118.58,24.91],"洛阳市":[112.45,34.62],
+  "香港":[114.17,22.32],"澳门":[113.55,22.19],"台北":[121.56,25.03]
+};
+const CITY_NAMES = Object.keys(CITIES);
+
+let ALL = [];
+let ALL_RAW = [];
+let historyData = [];
+let curIdx = 0;
+let activeCats = new Set(CAT_KEYS);
+let activeSources = new Set(["weibo","news","spider"]);
+let viewMode = 'scatter';
+let drillCityName = null;
+let drillCenter = null;
+let drillZoom = 1;
+let autoTimer = null;
+let chart;
+let insetChart;   // 南海诸岛插图实例
+
+function rand(a,b){ return a + Math.random()*(b-a); }
+function pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+function fmtTime(t){ if(!t||isNaN(new Date(t).getTime())) return "—"; const d=new Date(t); const p=n=>String(n).padStart(2,'0'); return `${p(d.getHours())}:${p(d.getMinutes())}`; }
+function srcTag(src){ return `<span class="tag tag-src-${src}">${SRC_LABEL[src]||src}</span>`; }
+// HTML 转义：新闻标题来自外部源，插入 innerHTML 前必须转义（防 XSS）
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+// ---- 后端不可达时的本地兜底 ----
+const TITLE_TPL = {
+  "民生": ["老旧小区改造提速","新增便民服务点","夜间经济街区开街","社区食堂受热捧"],
+  "财经": ["前三季度经济数据出炉","重大项目集中签约","新质生产力企业落地","消费券发放带动回暖"],
+  "突发": ["发布大风蓝色预警","道路抢险保畅通","局部短时强降雨","消防演练提升应急力"],
+  "文娱": ["音乐节门票开售","博物馆新展迎客","城市光影秀启幕","非遗市集人气旺"],
+  "体育": ["马拉松鸣枪开跑","球队主场告捷","全民健身季启动","青少年联赛落幕"]
+};
+const SOURCES = ["weibo","news","spider"];
+const POSW=["提速","告捷","落地","回暖","迎客","启动","签约","增长","突破","胜利","开售","夺冠","成功","上线","利好","稳增","提质","惠民","丰收","获奖","通车","竣工","脱贫","增效","便民"];
+const NEGW=["预警","事故","地震","火灾","暴雨","塌方","救援","遇难","损失","下跌","危机","诈骗","倒塌","疫情","爆炸","失踪","违规","停产","下滑","亏损","受害","塌陷","洪涝","干旱","冲突"];
+function genSentScore(title){ let p=0,n=0; for(let i=0;i<title.length-1;i++){const w=title.substr(i,2); if(POSW.includes(w))p++; else if(NEGW.includes(w))n++;} return p-n; }
+function genHotspots(n){
+  const list=[];
+  for(let i=0;i<n;i++){
+    const city=pick(CITY_NAMES), cat=pick(CAT_KEYS), sent=pick(["pos","neu","neg"]), src=pick(SOURCES), heat=Math.round(rand(20,100));
+    list.push({ city, cat, sent, sentScore:genSentScore(city+pick(TITLE_TPL[cat])), src, heat, rawHeat:heat*12000, title:city+pick(TITLE_TPL[cat]), url:"https://example.com/news/"+(1000+i) });
+  }
+  return list;
+}
+
+// ---- 数据 -> 散点 / 热力 ----
+function viewData(){
+  return ALL.filter(d=>activeCats.has(d.cat) && activeSources.has(d.src));
+}
+function toScatter(data){
+  return data.map(d=>{
+    const [lng,lat] = CITIES[d.city] || [105.0,35.0]; // 兜底落全国几何中心，不出界
+    return { name:d.city, value:[lng,lat,d.heat], raw:d,
+      itemStyle:{ color:CATEGORIES[d.cat], borderColor:SENT_RING[d.sent], borderWidth:d.sent==="neu"?1:3, shadowBlur:8, shadowColor:CATEGORIES[d.cat] } };
+  });
+}
+function toHeat(data){
+  return data.map(d=>{
+    const [lng,lat] = CITIES[d.city] || [105.0,35.0];
+    return [lng,lat,d.heat];
+  });
+}
+
+// ---- 渲染 ----
+function renderScatter(){
+  const data = toScatter(viewData());
+  chart.setOption({
+    tooltip:{ trigger:"item", backgroundColor:"#16213a", borderColor:"#2a3a5c", textStyle:{color:"#e6edf6"},
+      formatter:p=>{ if(!p.data||!p.data.raw) return p.name; const d=p.data.raw;
+        return `<b>${esc(d.title)}</b><br/>城市：${esc(d.city)}<br/>分类：${d.cat} ｜ 情感：${d.sent}（分${d.sentScore>=0?'+':''}${d.sentScore}）<br/>热度：${d.rawHeat} ｜ 来源：${d.src}`; } },
+    geo:{ map:"china-cities", roam:true, zoom:drillZoom, center:drillCenter||null,
+      boundingCoords:CHINA_BOUNDS, aspectScale:ASPECT_SCALE, ...geoLayout(),
+      scaleLimit:{min:0.8,max:12},
+      itemStyle:{areaColor:"#16213a",borderColor:"#2a3a5c"}, emphasis:{disabled:true}, label:{show:false} },
+    // 只用 geo 一套坐标系绘制底图 + 气泡（去掉冗余 map 系列，避免双坐标系/canvas 错位与纵向堆叠）
+    series:[
+      { type:"effectScatter", coordinateSystem:"geo", data, symbolSize:v=>8+v[2]/6, rippleEffect:{scale:2.4,brushType:"stroke"}, showEffectOn:"render" }
+    ]
+  }, true);
+}
+function renderHeat(){
+  const data = toHeat(viewData());
+  chart.setOption({
+    tooltip:{ trigger:"item", backgroundColor:"#16213a", borderColor:"#2a3a5c", textStyle:{color:"#e6edf6"},
+      formatter:p=>`热度密度：${p.value[2]}<br/>坐标：${p.value[0].toFixed(2)}, ${p.value[1].toFixed(2)}` },
+    geo:{ map:"china-cities", roam:true, zoom:drillZoom, center:drillCenter||null,
+      boundingCoords:CHINA_BOUNDS, aspectScale:ASPECT_SCALE, ...geoLayout(),
+      scaleLimit:{min:0.8,max:12},
+      itemStyle:{areaColor:"#16213a",borderColor:"#2a3a5c"}, emphasis:{disabled:true}, label:{show:false} },
+    visualMap:{ min:10, max:100, calculable:true, left:18, bottom:24, seriesIndex:0,
+      inRange:{color:["#1a3a6b","#2b6cff","#37d0c4","#fac858","#ee6666"]}, textStyle:{color:"#8aa0c0"}, text:["高","低"] },
+    // 同样只保留一套坐标系、单 canvas（去掉 zlevel:2，否则多 canvas 会被 pinCanvas 钉成 relative 后纵向堆叠）
+    series:[ { type:"heatmap", coordinateSystem:"geo", data, pointSize:16, blurSize:22 } ]
+  }, true);
+}
+function renderView(){
+  document.getElementById("viewModeLabel").textContent = viewMode==='scatter'?"气泡视图":"聚类热力";
+  if(viewMode==='scatter') renderScatter(); else renderHeat();
+  // canvas 可能在 setOption 同步创建、也可能在 zrender 刷新帧里创建：立即钉 + 下一帧补钉
+  pinCanvas(); requestAnimationFrame(pinCanvas);
+}
+
+function buildLegend(){
+  const el=document.getElementById("legend");
+  let html="<div style='margin-bottom:6px;color:#cfe0ff'>分类（点击切换）</div>";
+  CAT_KEYS.forEach(c=>{ html+=`<div class="row ${activeCats.has(c)?'':'off'}" data-c="${c}"><span class="dot" style="background:${CATEGORIES[c]}"></span>${c}</div>`; });
+  html+=`<div style="margin-top:8px;color:#cfe0ff">情感外环</div><div class="row"><span class="ring"></span>负面/风险</div><div class="row"><span class="dot" style="background:#4ea1ff"></span>正面</div>`;
+  el.innerHTML=html;
+  el.querySelectorAll(".row[data-c]").forEach(r=>{ r.onclick=()=>{ const c=r.dataset.c; if(activeCats.has(c))activeCats.delete(c); else activeCats.add(c); buildLegend(); renderView(); }; });
+}
+
+// ---- 侧栏 ----
+function renderSideDefault(){
+  document.getElementById("sideHead").innerHTML="<h2>热门城市 TOP</h2>";
+  const counts={}; viewData().forEach(d=>counts[d.city]=(counts[d.city]||0)+1);
+  const top=Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,12);
+  const box=document.getElementById("newsList");
+  box.innerHTML=top.map(([c,n])=>`<div class="city-row" data-c="${c}"><span>${c}</span><span class="cnt">${n}</span></div>`).join("")
+    +`<p class="hint">点击城市查看下钻详情（缩放+分类/情感/来源拆解+新闻）。</p>`;
+  box.querySelectorAll(".city-row").forEach(r=>r.onclick=()=>drillCity(r.dataset.c));
+  const unloc = ALL_RAW.filter(d=>(!d.city) && activeSources.has(d.src));
+  if(unloc.length){
+    box.innerHTML += `<div class="sect" style="margin-top:14px">未定位热点（无明确地域）· ${unloc.length}</div>`;
+    box.innerHTML += unloc.slice(0,10).map(d=>`<div class="news-item"><div class="t">${esc(d.title)}</div><div class="meta">${srcTag(d.src)}<span class="tag tag-cat">${d.cat}</span></div></div>`).join("");
+  }
+}
+function renderSideNews(city){
+  const items=viewData().filter(d=>d.city===city);
+  document.getElementById("sideHead").innerHTML=`<h2>${city} · 热点新闻</h2><button class="ghost back" onclick="drillUp()">← 返回全国</button>`;
+  const box=document.getElementById("newsList");
+  if(!items.length){ box.innerHTML="<p class='hint'>该城市当前筛选下暂无热点。</p>"; return; }
+  box.innerHTML=items.map(d=>{
+    const href=/^(https?:|#)/.test(d.url||'')?d.url:'#';
+    return `
+    <div class="news-item">
+      <div class="t"><a href="${esc(href)}" target="_blank" rel="noopener">${esc(d.title)}</a></div>
+      <div class="meta">
+        <span class="tag tag-cat">${d.cat}</span>
+        <span class="tag tag-sent-${d.sent}">${SENT_LABEL[d.sent]}</span>
+        ${srcTag(d.src)}
+        <span>热度 ${d.rawHeat}</span><span>情分 ${d.sentScore>=0?'+':''}${d.sentScore}</span>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+// ---- 下钻 ----
+function bars(map, keys, colorFn, total){
+  return keys.map(k=>{ const v=map[k]||0; const pct=total?Math.round(v/total*100):0;
+    return `<div class="bar-row"><span class="name">${k}</span><span class="track"><span class="fill" style="width:${pct}%;background:${colorFn(k)}"></span></span><span class="val">${v}</span></div>`; }).join("");
+}
+function drillCity(city){
+  drillCityName=city; drillCenter=CITIES[city]||null; drillZoom=4; renderView(); renderSideNews(city);
+  const items=viewData().filter(d=>d.city===city);
+  const total=items.length;
+  const avg=total?Math.round(items.reduce((s,d)=>s+d.heat,0)/total):0;
+  const avgScore=total? (items.reduce((s,d)=>s+d.sentScore,0)/total):0;
+  const catCount={}; CAT_KEYS.forEach(c=>catCount[c]=0); items.forEach(d=>catCount[d.cat]++);
+  const sentCount={pos:0,neu:0,neg:0}; items.forEach(d=>sentCount[d.sent]++);
+  const srcCount={weibo:0,news:0,spider:0}; items.forEach(d=>{ if(srcCount[d.src]!==undefined) srcCount[d.src]++; });
+  document.getElementById("dCity").textContent=city;
+  document.getElementById("dSub").textContent=historyData[curIdx]?.synthetic?"（含模拟历史时段）":fmtTime(historyData[curIdx]?.t)+" 时段";
+  document.getElementById("dCount").textContent=total;
+  document.getElementById("dAvg").textContent=avg;
+  document.getElementById("dScore").textContent=(avgScore>=0?'+':'')+avgScore.toFixed(1);
+  document.getElementById("dScore").style.color = avgScore>0?"#6ee7a8":avgScore<0?"#ff9a9a":"#b9c4d6";
+  document.getElementById("dCat").innerHTML=bars(catCount,CAT_KEYS,k=>CATEGORIES[k],total);
+  document.getElementById("dSent").innerHTML=bars(sentCount,["pos","neu","neg"],k=>({pos:"#4ea1ff",neu:"#5a6b85",neg:"#ff5b5b"})[k],total);
+  document.getElementById("dSrc").innerHTML=bars(srcCount,["weibo","news","spider"],k=>SRC_COLOR[k],total);
+  document.getElementById("detail").style.display="block";
+}
+function drillUp(){
+  drillCityName=null; drillCenter=null; drillZoom=1;
+  document.getElementById("detail").style.display="none";
+  renderView(); renderSideDefault();
+}
+
+// ---- 时间轴 ----
+function buildSlider(){
+  const sl=document.getElementById("timeSlider"); if(!sl) return;
+  sl.max=String(Math.max(0,historyData.length-1)); sl.value=String(historyData.length-1); curIdx=historyData.length-1;
+  updateTimeLabel();
+}
+function updateTimeLabel(){
+  const sl=document.getElementById("timeSlider"); if(!sl) return;
+  curIdx=Number(sl.value);
+  const snap=historyData[curIdx];
+  const lab=document.getElementById("timeLabel");
+  if(lab && snap) lab.textContent=(curIdx===historyData.length-1?"现在 ":"")+fmtTime(snap.t)+(snap.synthetic?" · 模拟":"");
+  ALL_RAW = snap?.data || [];
+  ALL = ALL_RAW.filter(d=>CITIES[d.city]);
+  renderView();
+  if(drillCityName) drillCity(drillCityName); else renderSideDefault();
+}
+
+// ---- 数据获取 ----
+async function fetchHotspots(){
+  try{
+    const r=await fetch('/api/hotspots'); if(!r.ok) throw new Error('HTTP '+r.status);
+    const j=await r.json();
+    historyData=j.history||[];
+    if(!historyData.length) historyData=[{t:Date.now(),data:j.latest||[],synthetic:false}];
+    const sm=document.getElementById("srcMode");
+    if(sm) sm.textContent = j.sample ? "数据：兜底样本（外部源未连通）" : "数据：实时接入" + (j.syntheticHistory?"（含模拟历史）":"");
+    buildSlider();
+  }catch(e){
+    historyData=[{t:Date.now(),data:genHotspots(60),synthetic:false}];
+    const sm=document.getElementById("srcMode");
+    if(sm) sm.textContent="数据：本地模拟（后端未连接）";
+    buildSlider();
+  }
+}
+async function refreshData(){ await fetchHotspots(); if(drillCityName) drillCity(drillCityName); else renderSideDefault(); }
+
+// ---- 外壳自愈：某些网络层（代理/静态快照）会剥离交付 HTML 的静态结构，
+//      导致 getElementById 返回 null → 静默白屏。这里在 JS 侧重建所有缺失的 UI 块，
+//      并用看门狗持续修复（动态创建的节点经验证可存活）----
+let __mainRecreated = false;
+function ensureBlock(id, parent, html, childIds){
+  let need = !document.getElementById(id);
+  if(!need && childIds) need = childIds.some(c=>!document.getElementById(c));
+  if(need){
+    const old = document.getElementById(id); if(old) old.remove();
+    const el = document.createElement('div'); el.id = id;
+    if(html) el.innerHTML = html;
+    parent.appendChild(el); return true;
+  }
+  return false;
+}
+function ensureShell(){
+  let healed = false;
+  if(!document.getElementById('app')){
+    const app = document.createElement('div'); app.id='app'; document.body.appendChild(app); healed = true;
+  }
+  const app = document.getElementById('app');
+  if(!document.getElementById('main')){
+    const m = document.createElement('div'); m.id='main'; app.appendChild(m); __mainRecreated = true; healed = true;
+  }
+  const main = document.getElementById('main');
+  // 去重防御：ensureBlock 以 id 查找、静态壳曾用 <header> 标签无 id，导致重复 header 叠在一起（标题串位）。
+  // querySelectorAll 对同一元素只返回一次，故 <header id="header"> 不会重复计入。
+  main.querySelectorAll(':scope > header, :scope > #header').forEach((el,i)=>{ if(i>0){ el.remove(); healed = true; } });
+  if(!document.getElementById('mapWrap')){ const w = document.createElement('div'); w.id='mapWrap'; main.appendChild(w); healed = true; }
+  if(!document.getElementById('insetMap')){ const w = document.createElement('div'); w.id='insetMap'; main.appendChild(w); healed = true; }
+  if(!document.getElementById('side')){ const s = document.createElement('div'); s.id='side'; app.appendChild(s); healed = true; }
+  const side = document.getElementById('side');
+  if(!document.getElementById('sideHead')){ const h = document.createElement('div'); h.id='sideHead'; side.appendChild(h); healed = true; }
+  if(!document.getElementById('newsList')){ const n = document.createElement('div'); n.id='newsList'; side.appendChild(n); healed = true; }
+  // 自愈 CSS（幂等，Grid 叠加方案：与主样式一致，且不含 position/z-index——快照层会剥离绝对定位元素）
+  if(!document.getElementById('__heal_css')){
+    const st = document.createElement('style'); st.id='__heal_css';
+    st.textContent = "#main{display:grid}#main>*{grid-area:1/1;position:relative}#mapWrap{width:100%;height:100%}"
+      + "#insetMap{justify-self:end;align-self:end;margin:0 18px 64px 0;width:132px;height:158px;background:rgba(13,20,35,.92);border:1px solid #25324d;border-radius:8px}"
+      + "header,#header{justify-self:start;align-self:start;margin:14px 18px}header h1,#header h1{font-size:18px;margin:0 0 4px;font-weight:600}header p,#header p{font-size:12px;color:#8aa0c0;margin:0}"
+      + "#toolbar{justify-self:center;align-self:start;margin-top:62px;background:rgba(17,25,43,.97);border:1px solid #2a3a5c;border-radius:10px;padding:8px 12px;box-shadow:0 6px 22px rgba(0,0,0,.45);display:flex;align-items:center;gap:14px;row-gap:8px;font-size:12px;max-width:92%;flex-wrap:wrap}"
+      + "#toolbar .seg{display:flex;border:1px solid #2a3a5c;border-radius:7px;overflow:hidden;flex:0 0 auto}#toolbar .seg button{background:transparent;border:0;color:#cfe0ff;padding:6px 12px;cursor:pointer;font-size:12px;white-space:nowrap}#toolbar .seg button.active{background:#2b6cff;color:#fff}"
+      + "#toolbar label{color:#8aa0c0;display:flex;align-items:center;gap:5px;flex:0 0 auto;white-space:nowrap}#timeSlider{width:170px;min-width:90px;flex:0 0 auto;accent-color:#2b6cff}#timeLabel{color:#cfe0ff;min-width:88px;flex:0 0 auto;white-space:nowrap}#toolbar .timeGroup{display:flex;align-items:center;gap:14px;flex-wrap:nowrap;flex:0 0 auto}"
+      + "#legend{justify-self:end;align-self:start;margin:152px 18px 0 0;background:rgba(17,25,43,.97);border:1px solid #2a3a5c;border-radius:8px;padding:10px 12px;font-size:12px;box-shadow:0 6px 22px rgba(0,0,0,.45)}"
+      + "#legend .row{display:flex;align-items:center;gap:6px;margin:3px 0;cursor:pointer;user-select:none}#legend .dot{width:12px;height:12px;border-radius:50%;display:inline-block}#legend .off{opacity:.35;text-decoration:line-through}#legend .ring{width:12px;height:12px;border-radius:50%;border:2px solid #ee6666;display:inline-block}"
+      + "#detail{justify-self:start;align-self:start;margin:152px 18px;width:300px;background:rgba(15,23,41,.94);border:1px solid #2a3a5c;border-radius:12px;padding:14px;display:none;box-shadow:0 8px 30px rgba(0,0,0,.5)}"
+      + "#detail h3{margin:0 0 4px;font-size:16px}#detail .sub{font-size:12px;color:#8aa0c0;margin-bottom:10px}#detail .stat{display:flex;gap:8px;margin-bottom:12px}#detail .stat .box{flex:1;background:#16213a;border:1px solid #2a3a5c;border-radius:8px;padding:8px;text-align:center}#detail .stat .num{font-size:19px;font-weight:700}#detail .stat .lab{font-size:11px;color:#8aa0c0}#detail .sect{font-size:12px;color:#cfe0ff;margin:10px 0 6px}"
+      + ".bar-row{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:12px}.bar-row .name{width:48px;color:#b9c4d6}.bar-row .track{flex:1;height:10px;background:#16213a;border-radius:5px;overflow:hidden}.bar-row .fill{height:100%;border-radius:5px}.bar-row .val{width:30px;text-align:right;color:#8aa0c0}"
+      + "#loading{justify-self:stretch;align-self:stretch;display:flex;align-items:center;justify-content:center;font-size:14px;color:#8aa0c0;background:#0f1729}"
+      + "#refresh{justify-self:end;align-self:end;margin:0 18px 18px 0}"
+      + "@media (max-width:1200px){#legend,#detail{margin-top:220px}}"
+      + "@media (max-height:640px){#legend{margin-top:148px;font-size:11px;padding:8px 10px}#legend .row{margin:2px 0}#legend .dot,#legend .ring{width:10px;height:10px}#detail{margin-top:148px}#insetMap{width:96px;height:116px;margin-bottom:60px}}";
+    document.head.appendChild(st);
+  }
+  if(ensureBlock('header', main, '<h1>数字化中国地图 · 实时热点新闻</h1><p>公众资讯 · Web 端 · 非商用演示 · <span id="srcMode">加载中…</span> · <span id="viewModeLabel">气泡视图</span> · <span id="buildTag" style="color:#4a5c7a">构建 V1.0</span></p>', ['srcMode','viewModeLabel','buildTag'])) healed = true;
+  if(ensureBlock('toolbar', main, '<div class="seg" id="viewSeg"><button data-v="scatter" class="active">气泡视图</button><button data-v="heat">聚类热力</button></div>'
+    + '<div class="seg" id="srcSeg"><button data-s="weibo" class="active">热搜</button><button data-s="news" class="active">新闻</button><button data-s="spider" class="active">爬虫</button></div>'
+    + '<div class="timeGroup"><label>时间轴 <input type="range" id="timeSlider" min="0" max="0" value="0" /></label><span id="timeLabel">—</span>'
+    + '<label><input type="checkbox" id="autoRefresh" /> 自动刷新 30s</label></div>', ['viewSeg','srcSeg','timeSlider','timeLabel','autoRefresh'])) healed = true;
+  if(ensureBlock('legend', main, '', [])) healed = true;
+  if(ensureBlock('detail', main, '<h3 id="dCity">—</h3><div class="sub" id="dSub">—</div>'
+    + '<div class="stat"><div class="box"><div class="num" id="dCount">0</div><div class="lab">热点数</div></div><div class="box"><div class="num" id="dAvg">0</div><div class="lab">平均热度</div></div><div class="box"><div class="num" id="dScore">0</div><div class="lab">情感分</div></div></div>'
+    + '<div class="sect">分类构成</div><div id="dCat"></div><div class="sect">情感构成</div><div id="dSent"></div><div class="sect">来源构成</div><div id="dSrc"></div>'
+    + '<button class="ghost" style="width:100%;margin-top:12px" onclick="drillUp()">返回全国视图</button>', ['dCity','dSub','dCount','dAvg','dScore','dCat','dSent','dSrc'])) healed = true;
+  const det = document.getElementById('detail'); if(det) det.style.display='none';
+  if(ensureBlock('refresh', main, '<button onclick="refreshData()">↻ 刷新数据</button>', [])) healed = true;
+  if(ensureBlock('loading', main, '正在加载地级市底图（DataV 审图合规源）…', [])) healed = true;
+  return healed;
+}
+// 事件委托：绑定在 document 上，子元素被剥离重建后依然有效（且不会重复绑定）
+function wireEvents(){
+  if(window.__shellWired) return; window.__shellWired = true;
+  document.addEventListener("click", e=>{
+    const vb = e.target.closest && e.target.closest("#viewSeg button[data-v]");
+    if(vb){ viewMode=vb.dataset.v; document.querySelectorAll("#viewSeg button").forEach(x=>x.classList.toggle("active",x===vb)); renderView(); return; }
+    const sb = e.target.closest && e.target.closest("#srcSeg button[data-s]");
+    if(sb){ const s=sb.dataset.s; if(activeSources.has(s)) activeSources.delete(s); else activeSources.add(s);
+      sb.classList.toggle("active",activeSources.has(s)); renderView(); if(drillCityName) drillCity(drillCityName); else renderSideDefault(); }
+  });
+  document.addEventListener("input", e=>{ if(e.target && e.target.id==="timeSlider") updateTimeLabel(); });
+  document.addEventListener("change", e=>{ if(e.target && e.target.id==="autoRefresh"){ if(autoTimer){clearInterval(autoTimer);autoTimer=null;} if(e.target.checked) autoTimer=setInterval(refreshData,30000); } });
+}
+// ---- 启动调度与双层看门狗 ----
+// 本环境网络层（代理/静态快照）会在约1.5秒时对页面做两种破坏：
+//   A) 元素级修剪：删掉 #main 下的静态 UI 块（ MutationObserver 可见）
+//   B) 文档体替换：整个 document.body 换成旧快照（无导航事件、Observer 绑在旧 body 上看不到）
+// 两者都会让异步途中的 getElementById 拿到 null → 静默白屏。
+// 对策：①数据/底图缓存进 JS 变量，重建时零重取；②500ms 检查 body 身份，被换则延迟300ms完整重建；
+//      ②2s 元素级看门狗补删；③所有 DOM 访问判空。----
+let mapReady = false, booted = false, fcollCache = null;
+let bodyRef = document.body;
+function hideLoading(){ const l=document.getElementById("loading"); if(l) l.style.display="none"; }
+// echarts 的 canvas 默认 position:absolute，会被沙箱快照层当悬浮元素整块剥离（地图空白的真凶）。
+// 首帧渲染后立即把 canvas 钉成 relative：仍在文档流内、位置尺寸不变，但快照层不再动它。
+function pinCanvas(){
+  ["mapWrap","insetMap"].forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    el.querySelectorAll("canvas").forEach(c=>{
+      if(c.style && c.style.position!=="relative"){ c.style.position="relative"; }
+    });
+  });
+}
+function canvasAlive(){
+  const mw=document.getElementById("mapWrap");
+  return !!(mw && mw.querySelector("canvas"));
+}
+function shellIntact(){
+  return !!(document.getElementById('toolbar') && document.getElementById('legend') && document.getElementById('loading') && document.getElementById('sideHead'));
+}
+function bindChart(){
+  if(!chart) return;
+  chart.off("click");
+  chart.on("click",params=>{ if(params.data&&params.data.raw) drillCity(params.data.raw.city); });
+}
+// 南海诸岛插图：独立小实例，仅用 geo 聚焦南海海域（含三沙市岛礁），保证审图合规要素不被主图裁剪
+function initInset(){
+  if(!mapReady) return;   // 底图未注册前不建插图，避免 "Map china-cities not exists"
+  const el = document.getElementById("insetMap"); if(!el) return;
+  el.removeAttribute("_echarts_instance_");
+  insetChart = (echarts.getInstanceByDom ? echarts.getInstanceByDom(el) : null) || echarts.init(el);
+  insetChart.setOption({
+    title:{ text:"南海诸岛", left:"center", top:3, textStyle:{ fontSize:10, color:"#8aa0c0" } },
+    geo:{ map:"china-cities", roam:false, silent:true, aspectScale:0.9,
+      boundingCoords:[[106, 2],[123, 24]],
+      itemStyle:{ areaColor:"#16213a", borderColor:"#2a3a5c" }, emphasis:{disabled:true}, label:{show:false} }
+  }, true);
+  pinCanvas(); requestAnimationFrame(pinCanvas);
+}
+async function fullInit(){
+  if(booted) return; booted = true;
+  ensureShell(); wireEvents();
+  const mainEl = document.getElementById("mapWrap"); if(!mainEl) return;
+  chart = echarts.getInstanceByDom(mainEl) || echarts.init(mainEl);
+  // 窗口尺寸变化时：先 resize，再按新的 UI 实测高度重算地图留白（防工具栏换行后压住地图）
+  let __rsTimer = null, __rsW = 0, __rsH = 0;
+  window.addEventListener("resize",()=>{
+    const w = document.getElementById("mapWrap");
+    if(chart) chart.resize();
+    if(insetChart) insetChart.resize();
+    const nw = w ? w.clientWidth : 0, nh = w ? w.clientHeight : 0;
+    if(nw === __rsW && nh === __rsH) return;
+    __rsW = nw; __rsH = nh;
+    clearTimeout(__rsTimer);
+    __rsTimer = setTimeout(()=>{ if(chart) renderView(); }, 220);
+  });
+  try{
+    if(!fcollCache){
+      try{ const r = await fetch('/api/china-map'); if(r.ok) fcollCache = await r.json(); }catch(e){}
+      if(!fcollCache) fcollCache = window.__CHINA_GEO_PROV__ || null; // 离线双击打开时用内联省级兜底
+    }
+    if(!fcollCache){
+      const ld=document.getElementById("loading");
+      if(ld) ld.innerHTML="底图加载失败：请确认 node server.js 已运行于 localhost:8080 后刷新，<br/>或直接打开同目录下的 china-map-standalone.html 离线查看。";
+      return;
+    }
+    echarts.registerMap("china-cities", fcollCache);
+    mapReady = true; hideLoading();
+    await fetchHotspots(); buildLegend(); renderView(); renderSideDefault();
+    bindChart(); initInset();
+  }catch(err){
+    const el=document.getElementById("loading");
+    if(el){ el.style.display="flex"; el.style.whiteSpace="pre-wrap"; el.style.padding="24px"; el.style.textAlign="left";
+      el.innerHTML="⚠️ 初始化失败（请把这段发我）：\n\n"+(err&&err.stack||err); }
+  }
+}
+function scheduleBoot(){ if(shellIntact()) fullInit(); else setTimeout(fullInit, 2500); }
+scheduleBoot();
+// 看门狗A：文档体被整体替换 → 等300ms稳定后完整重建（数据已在内存，零重取）
+setInterval(()=>{
+  if(document.body === bodyRef) return;
+  bodyRef = document.body;
+  setTimeout(()=>{
+    ensureShell(); wireEvents();
+    const m = document.getElementById("mapWrap");
+    if(m && (!chart || !document.body.contains(chart.dom))){
+      try{ if(chart) chart.dispose(); }catch(e){}
+      m.removeAttribute("_echarts_instance_"); // 录制壳可能残留该属性，导致 init 报错
+      chart = echarts.getInstanceByDom(m) || echarts.init(m);
+    }
+    if(mapReady) hideLoading();
+    if(chart){ buildLegend(); renderView(); bindChart(); if(drillCityName) drillCity(drillCityName); else renderSideDefault(); }
+    if(mapReady){ try{ initInset(); }catch(e){} }
+  }, 300);
+}, 500);
+// 看门狗B：元素级修剪 / canvas 被剥 → 补建 + 重渲染
+function healWatchdog(){
+  const healed = ensureShell();
+  if(!chart) return;
+  let chartRebuilt = false;
+  // chart.dom 还在但里面 canvas 被快照层剥走 → 实例已成空壳，必须 dispose 后重建
+  if(!document.body.contains(chart.dom) || !canvasAlive()){
+    try{ chart.dispose(); }catch(e){}
+    const m = document.getElementById("mapWrap"); if(!m) return;
+    m.removeAttribute("_echarts_instance_");
+    chart = echarts.getInstanceByDom(m) || echarts.init(m); bindChart();
+    chartRebuilt = true;
+  }
+  // 插图 canvas 被剥 / 实例丢失 → 重建
+  const insetEl = document.getElementById("insetMap");
+  if(insetEl && (!insetChart || !document.body.contains(insetChart.dom) || !insetEl.querySelector("canvas"))){
+    try{ initInset(); }catch(e){}
+  }
+  if(mapReady) hideLoading();
+  const legendEl = document.getElementById("legend");
+  const contentWiped = chartRebuilt || healed || (legendEl && legendEl.children.length === 0 && ALL.length > 0);
+  if(contentWiped){
+    buildLegend(); renderView();
+    if(drillCityName) drillCity(drillCityName); else renderSideDefault();
+  }
+}
+setInterval(healWatchdog, 2000);
+// 暴露给 HTML 内联事件属性使用（detail/refresh 块里的 onclick="drillUp()" 等）
+window.drillUp = drillUp; window.refreshData = refreshData;
+// 测试钩子：仅当系统测试预设 window.__TEST_HOOKS__ 时挂载内部引用，生产环境不触发、零影响
+if(window.__TEST_HOOKS__){
+  const H = window.__TEST_HOOKS__;
+  H.drillCity=drillCity; H.renderView=renderView; H.renderSideDefault=renderSideDefault;
+  H.drillUp=drillUp; H.refreshData=refreshData; H.updateTimeLabel=updateTimeLabel;
+  H.viewData=viewData; H.fmtTime=fmtTime; H.toScatter=toScatter; H.esc=esc; H.buildLegend=buildLegend;
+  Object.defineProperties(H, {
+    ALL:{get:()=>ALL}, ALL_RAW:{get:()=>ALL_RAW}, CITIES:{get:()=>CITIES},
+    activeCats:{get:()=>activeCats,set:v=>{activeCats=v}},
+    activeSources:{get:()=>activeSources,set:v=>{activeSources=v}},
+    viewMode:{get:()=>viewMode,set:v=>{viewMode=v}}
+  });
+}
+})();
+</script>
+</body>
+</html>

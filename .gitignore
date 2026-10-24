@@ -1,0 +1,18 @@
+# ===== 本地私密配置（含 API key，绝不提交）=====
+config.json
+
+# ===== 运行期数据 =====
+history.json
+
+# ===== 临时诊断脚本 / 截图（以 _ 开头均为一次性排查文件）=====
+_*
+*.png
+
+# ===== 交付概览（非源码）=====
+overview.md
+
+# ===== 依赖与系统文件 =====
+node_modules/
+npm-debug.log*
+.DS_Store
+Thumbs.db

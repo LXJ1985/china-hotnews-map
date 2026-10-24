@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>数字化中国地图 · 实时热点新闻（离线自包含版）</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f1729; color: #e6edf6; }
+  #app { display: flex; height: 100vh; }
+  #main { flex: 1; position: relative; overflow: hidden; }
+  #side { width: 340px; background: #131c30; border-left: 1px solid #25324d; padding: 16px; overflow-y: auto; }
+  header { position: absolute; top: 14px; left: 18px; z-index: 5; }
+  header h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+  header p { font-size: 12px; color: #8aa0c0; margin: 0; }
+  #toolbar { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 6;
+    background: rgba(19,28,48,.9); border: 1px solid #25324d; border-radius: 10px; padding: 8px 12px;
+    display: flex; align-items: center; gap: 14px; font-size: 12px; max-width: 72%; flex-wrap: wrap; }
+  #toolbar .seg { display: flex; border: 1px solid #2a3a5c; border-radius: 7px; overflow: hidden; }
+  #toolbar .seg button { background: transparent; border: 0; color: #cfe0ff; padding: 6px 12px; cursor: pointer; font-size: 12px; border-radius: 0; }
+  #toolbar .seg button.active { background: #2b6cff; color: #fff; }
+  #toolbar label { color: #8aa0c0; display: flex; align-items: center; gap: 5px; }
+  #timeSlider { width: 170px; accent-color: #2b6cff; }
+  #timeLabel { color: #cfe0ff; min-width: 88px; font-variant-numeric: tabular-nums; }
+  #legend { position: absolute; top: 100px; right: 18px; z-index: 5; background: rgba(19,28,48,.85); border: 1px solid #25324d; border-radius: 8px; padding: 10px 12px; font-size: 12px; }
+  #legend .row { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; user-select: none; }
+  #legend .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  #legend .off { opacity: .35; text-decoration: line-through; }
+  #legend .ring { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #ee6666; display: inline-block; }
+  #refresh { position: absolute; bottom: 18px; right: 18px; z-index: 5; }
+  button { background: #2b6cff; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+  button:hover { background: #1f5ae0; }
+  button.ghost { background: #21314f; }
+  button.ghost:hover { background: #2a3f66; }
+  #detail { position: absolute; top: 100px; left: 18px; z-index: 7; width: 300px; background: rgba(15,23,41,.94);
+    border: 1px solid #2a3a5c; border-radius: 12px; padding: 14px; display: none; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+  #detail h3 { margin: 0 0 4px; font-size: 16px; }
+  #detail .sub { font-size: 12px; color: #8aa0c0; margin-bottom: 10px; }
+  #detail .stat { display: flex; gap: 8px; margin-bottom: 12px; }
+  #detail .stat .box { flex: 1; background: #16213a; border: 1px solid #2a3a5c; border-radius: 8px; padding: 8px; text-align: center; }
+  #detail .stat .num { font-size: 19px; font-weight: 700; }
+  #detail .stat .lab { font-size: 11px; color: #8aa0c0; }
+  #detail .sect { font-size: 12px; color: #cfe0ff; margin: 10px 0 6px; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px; }
+  .bar-row .name { width: 48px; color: #b9c4d6; }
+  .bar-row .track { flex: 1; height: 10px; background: #16213a; border-radius: 5px; overflow: hidden; }
+  .bar-row .fill { height: 100%; border-radius: 5px; }
+  .bar-row .val { width: 30px; text-align: right; color: #8aa0c0; }
+  #side h2 { font-size: 15px; margin: 4px 0 12px; }
+  #side .back { margin-bottom: 10px; }
+  .news-item { background: #1a2540; border: 1px solid #2a3a5c; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+  .news-item .t { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .news-item .meta { font-size: 12px; color: #8aa0c0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .tag { padding: 1px 7px; border-radius: 4px; font-size: 11px; }
+  .tag-cat { background: #21314f; color: #cfe0ff; }
+  .tag-sent-pos { background: #163a2a; color: #6ee7a8; }
+  .tag-sent-neu { background: #2a2f3d; color: #b9c4d6; }
+  .tag-sent-neg { background: #3a1c1c; color: #ff9a9a; }
+  .tag-src-weibo { background: #3a1c24; color: #ff9a9a; }
+  .tag-src-news { background: #16331f; color: #6ee7a8; }
+  .tag-src-spider { background: #3a2f12; color: #fac858; }
+  .tag-src-sample { background: #2a2f3d; color: #b9c4d6; }
+  .city-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; margin-bottom: 6px;
+    background: #1a2540; border: 1px solid #2a3a5c; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .city-row:hover { border-color: #2b6cff; }
+  .city-row .cnt { background: #21314f; color: #cfe0ff; border-radius: 10px; padding: 1px 9px; font-size: 12px; }
+  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; color: #8aa0c0; z-index: 10; background: #0f1729; }
+  .hint { font-size: 12px; color: #6b7d9c; margin-top: 8px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="main">
+    <header>
+      <h1>数字化中国地图 · 实时热点新闻</h1>
+      <p>公众资讯 · Web 端 · 非商用演示 · <span id="srcMode">加载中…</span> · <span id="viewModeLabel">气泡视图</span></p>
+    </header>
+    <div id="toolbar">
+      <div class="seg" id="viewSeg">
+        <button data-v="scatter" class="active">气泡视图</button>
+        <button data-v="heat">聚类热力</button>
+      </div>
+      <div class="seg" id="srcSeg">
+        <button data-s="weibo" class="active">热搜</button>
+        <button data-s="news" class="active">新闻</button>
+        <button data-s="spider" class="active">爬虫</button>
+      </div>
+      <label>时间轴 <input type="range" id="timeSlider" min="0" max="0" value="0" /></label>
+      <span id="timeLabel">—</span>
+      <label><input type="checkbox" id="autoRefresh" /> 自动刷新 30s</label>
+    </div>
+    <div id="legend"></div>
+    <div id="detail">
+      <h3 id="dCity">—</h3>
+      <div class="sub" id="dSub">—</div>
+      <div class="stat">
+        <div class="box"><div class="num" id="dCount">0</div><div class="lab">热点数</div></div>
+        <div class="box"><div class="num" id="dAvg">0</div><div class="lab">平均热度</div></div>
+        <div class="box"><div class="num" id="dScore">0</div><div class="lab">情感分</div></div>
+      </div>
+      <div class="sect">分类构成</div>
+      <div id="dCat"></div>
+      <div class="sect">情感构成</div>
+      <div id="dSent"></div>
+      <div class="sect">来源构成</div>
+      <div id="dSrc"></div>
+      <button class="ghost" style="width:100%;margin-top:12px" onclick="drillUp()">返回全国视图</button>
+    </div>
+    <div id="refresh"><button onclick="historyData=buildHistory();buildSlider();">↻ 刷新数据</button></div>
+    <div id="loading">正在加载底图…</div>
+  </div>
+  <div id="side">
+    <div id="sideHead"></div>
+    <div id="newsList"></div>
+  </div>
+</div>
+<!--__ECHARTS__-->
+<!--__GEO__-->
+<!--__APP__-->
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "tianKey": "在此填入天行数据 API key（https://www.tianapi.com）",
+  "juheKey": "在此填入聚合数据 API key（https://www.juhe.cn，留空则不用）",
+  "tianTypes": "generalnews,tech,sports,ent,money",
+  "juheTypes": "top"
+}
